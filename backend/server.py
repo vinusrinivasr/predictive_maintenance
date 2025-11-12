@@ -35,6 +35,15 @@ API_KEY = os.environ.get('ESP32_API_KEY', 'default_esp32_key_change_me')
 # Create the main app without a prefix
 app = FastAPI()
 
+@app.on_event("startup")
+async def start_fetch_loop():
+    async def background_task():
+        while True:
+            await fetch_thingspeak_temperature()
+            await asyncio.sleep(30)  # fetch every 30 seconds
+
+    asyncio.create_task(background_task())
+
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
@@ -277,11 +286,16 @@ async def ingest_temperature(data: IngestTemperature):
     }
 
 @api_router.get("/latest-temperature")
-async def get_latest_temperature(machine_type: str, current_user: dict = Depends(get_current_user)):
+async def get_latest_temperature(machine_type: str):
     temp = await db.latest_temperature.find_one({"machine_type": machine_type}, {"_id": 0})
     if not temp:
+        print(f"[API] No latest temp found for {machine_type}")
         return {"machine_type": machine_type, "temperature": None, "updated_at": None}
+
+    print(f"[API] Returning temperature: {temp}")
     return temp
+
+
 
 # ==================== PREDICTION ENGINE ====================
 
@@ -549,3 +563,54 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+import httpx
+import asyncio
+
+THINGSPEAK_CHANNEL_ID = os.environ.get("THINGSPEAK_CHANNEL_ID")
+THINGSPEAK_API_KEY = os.environ.get("THINGSPEAK_API_KEY")
+THINGSPEAK_FIELD = os.environ.get("THINGSPEAK_FIELD", "field1")
+
+async def fetch_thingspeak_temperature():
+    try:
+        url = f"https://api.thingspeak.com/channels/{THINGSPEAK_CHANNEL_ID}/feeds/last.json?api_key={THINGSPEAK_API_KEY}"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            data = response.json()
+
+        print("[ThingSpeak] Raw Response:", data)
+
+        # Extract the field value (ThingSpeak returns field1, field2, etc.)
+        raw_value = data.get(THINGSPEAK_FIELD)
+        if not raw_value:
+            print(f"[ThingSpeak] No value found in {THINGSPEAK_FIELD}, skipping update.")
+            return
+
+        try:
+            temperature = float(raw_value)
+        except (TypeError, ValueError):
+            print(f"[ThingSpeak] Invalid value '{raw_value}' for {THINGSPEAK_FIELD}")
+            return
+
+        machine_type = "CNC"
+
+        temp_doc = {
+            "machine_type": machine_type,
+            "temperature": temperature,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        result = await db.latest_temperature.update_one(
+            {"machine_type": machine_type},
+            {"$set": temp_doc},
+            upsert=True,
+        )
+
+        print(f"[ThingSpeak] ✅ Updated DB: {machine_type} → {temperature}°C")
+
+    except Exception as e:
+        print(f"[ThingSpeak] ❌ Fetch error: {e}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)

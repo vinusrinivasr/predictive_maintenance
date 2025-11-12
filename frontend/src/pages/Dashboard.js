@@ -30,20 +30,26 @@ const Dashboard = () => {
   const [result, setResult] = useState(null);
 
   useEffect(() => {
-    if (autoTemp) {
-      fetchLatestTemperature();
-    }
-  }, [machineType, autoTemp]);
+  fetchLatestTemperature();
+  const interval = setInterval(() => {
+    if (autoTemp) fetchLatestTemperature();
+  }, 10000);
+  return () => clearInterval(interval);
+}, [machineType, autoTemp]);
+
 
   const fetchLatestTemperature = async () => {
     try {
       const response = await axios.get(`${API}/latest-temperature?machine_type=${machineType}`, {
         headers: getAuthHeader()
       });
+      console.log("Fetched temperature:", response.data);
+
+    if (response.data && response.data.temperature !== null && response.data.temperature !== undefined) {
+      const tempValue = response.data.temperature.toString();
       setLatestTemp(response.data);
-      if (response.data.temperature !== null) {
-        setFormData(prev => ({ ...prev, temperature: response.data.temperature.toString() }));
-      }
+      setFormData(prev => ({ ...prev, temperature: tempValue }));
+    }
     } catch (error) {
       console.error('Failed to fetch temperature:', error);
     }
